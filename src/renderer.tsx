@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import Orb from './components/orb';
-import './components/orb/Orb.css';
+import './App.css';
 
 const App = () => {
   const [isListening, setIsListening] = useState(false);
@@ -264,10 +264,12 @@ const App = () => {
           </div>
         ))}
       </div>
-      <div id="interim-results">{interimResult}</div>
-      <div id="status">{isListening ? 'Listening...' : 'Click to Speak'}</div>
-      <div onClick={startListening} style={{ cursor: 'pointer', position: 'absolute', bottom: '20px', left: '50%', transform: 'translateX(-50%)' }}>
-        <Orb forceHoverState={isListening} />
+      <div id="bottom-container">
+        <div id="interim-results">{interimResult}</div>
+        <div id="status">{isListening ? 'Listening...' : 'Click to Speak'}</div>
+        <div onClick={startListening} style={{ cursor: 'pointer' }}>
+          <Orb forceHoverState={isListening} />
+        </div>
       </div>
     </div>
   );
