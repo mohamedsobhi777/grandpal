@@ -10,8 +10,6 @@ const App = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isTakingScreenshot, setIsTakingScreenshot] = useState(false);
-  const [conversation, setConversation] = useState<{ speaker: string; message: string; type: string }[]>([]);
-  const [interimResult, setInterimResult] = useState('');
   const [currentLanguage, setCurrentLanguage] = useState('en');
 
   const mediaStream = useRef<MediaStream | null>(null);
@@ -23,7 +21,6 @@ const App = () => {
   useEffect(() => {
     initializeSpeechRecognition();
     initializeBrowserSpeechRecognition();
-    showDeepgramInstructions();
     greetUser();
 
     return () => {
@@ -32,8 +29,8 @@ const App = () => {
   }, []);
 
   const stopSpeaking = () => {
-    window.speechSynthesis.cancel(); // Stop browser TTS
-    window.grandpalAPI.stopSpeaking(); // Stop backend TTS
+    window.speechSynthesis.cancel();
+    window.grandpalAPI.stopSpeaking();
   };
 
   const pauseBrowserSpeechRecognition = () => {
@@ -105,17 +102,13 @@ const App = () => {
 
   const initializeSpeechRecognition = () => {
     window.grandpalAPI.onSpeechTranscript((result: any) => {
-      if (!result.isFinal) {
-        setInterimResult(result.transcript);
-      } else if (result.isFinal && result.transcript) {
-        addToConversation('You', result.transcript, 'user');
+      if (result.isFinal && result.transcript) {
         processVoiceCommand(result.transcript);
-        setInterimResult('');
       }
     });
 
     window.grandpalAPI.onSpeechListeningStatus((isListening: boolean) => {
-      if (isSpeaking) return; // Ignore listening status changes while speaking
+      if (isSpeaking) return;
       setListeningState(isListening ? 'listening' : 'idle');
     });
 
@@ -124,7 +117,7 @@ const App = () => {
     });
 
     window.grandpalAPI.onSpeechError((error: any) => {
-      addToConversation('System', `Error: ${error.message || JSON.stringify(error)}`, 'error');
+      console.error('Speech error:', error);
     });
 
     window.grandpalAPI.onSpeechFallbackToBrowser((data: { language: string }) => {
@@ -148,13 +141,12 @@ const App = () => {
     recognition.onstart = () => {
       if (!browserPausedForSpeaking.current) {
         setListeningState('listening');
-        addToConversation('System', '🎤 Listening with browser...', 'system');
       }
     };
 
     recognition.onerror = (event: any) => {
       if (!browserPausedForSpeaking.current) {
-        addToConversation('System', `Browser Speech Error: ${event.error}`, 'error');
+        console.error('Browser Speech Error:', event.error);
         setListeningState('idle');
       }
     };
@@ -166,44 +158,36 @@ const App = () => {
     };
 
     recognition.onresult = (event: any) => {
-      // Don't process results if we paused for speaking
       if (browserPausedForSpeaking.current) {
         return;
       }
 
       let finalTranscript = '';
-      let interimTranscript = '';
 
       for (let i = event.resultIndex; i < event.results.length; ++i) {
         if (event.results[i].isFinal) {
           finalTranscript += event.results[i][0].transcript;
-        } else {
-          interimTranscript += event.results[i][0].transcript;
         }
       }
 
       if (finalTranscript) {
-        addToConversation('You', finalTranscript.trim(), 'user');
         processVoiceCommand(finalTranscript.trim());
       }
-      setInterimResult(interimTranscript);
     };
     browserRecognition.current = recognition;
   };
 
   const startBrowserSpeechRecognition = (language: string) => {
     if (!browserRecognition.current) {
-      addToConversation('System', 'Browser speech recognition not supported.', 'error');
+      console.error('Browser speech recognition not supported.');
       return false;
     }
     try {
       browserRecognition.current.lang = language;
       browserRecognition.current.start();
-      usingBrowserFallback.current = true;
-      browserPausedForSpeaking.current = false;
       return true;
     } catch (error) {
-      console.error('Could not start browser recognition:', error);
+      console.error('Error starting browser recognition:', error);
       return false;
     }
   };
@@ -211,43 +195,6 @@ const App = () => {
   const stopBrowserSpeechRecognition = () => {
     if (browserRecognition.current) {
       browserRecognition.current.stop();
-      browserPausedForSpeaking.current = false;
-    }
-  };
-
-  const showDeepgramInstructions = async () => {
-    const result = await window.grandpalAPI.getDeepgramInstructions();
-    if (!result.instructions || result.instructions === 'demo-key') {
-      addToConversation(
-        'System',
-        '💡 For better speech recognition, get a free Deepgram API key and set it in your .env file.',
-        'system'
-      );
-    }
-  };
-
-  const takeManualScreenshot = async () => {
-    setIsTakingScreenshot(true);
-    addToConversation('System', '📸 Taking screenshot...', 'system');
-    
-    try {
-      const screenshotResult = await window.grandpalAPI.captureScreenshot();
-      if (screenshotResult.success && screenshotResult.screenshot) {
-        addToConversation('System', '✅ Screenshot captured! You can now ask me about what\'s on your screen.', 'system');
-        // Process a default command to analyze the screenshot
-        const result = await window.grandpalAPI.processVoiceCommand("What do you see on my screen?", screenshotResult.screenshot);
-        if (result) {
-          addToConversation('GrandPal', result.response, 'assistant');
-          await speakResponse(result.response);
-        }
-      } else {
-        addToConversation('System', '❌ Could not capture screenshot. Please try again.', 'error');
-      }
-    } catch (error) {
-      console.error('Error capturing screenshot:', error);
-      addToConversation('System', '❌ Error capturing screenshot. Please try again.', 'error');
-    } finally {
-      setIsTakingScreenshot(false);
     }
   };
 
@@ -256,35 +203,24 @@ const App = () => {
       await stopListening();
     }
 
-    // Check if the user is asking GrandPal to look at something
-    const lookKeywords = ['look at', 'see', 'what\'s on', 'screen', 'display', 'showing', 'visible', 'looking at'];
-    const shouldTakeScreenshot = lookKeywords.some(keyword => 
-      command.toLowerCase().includes(keyword)
-    );
-
     let screenshot: string | undefined;
-    if (shouldTakeScreenshot) {
-      setIsTakingScreenshot(true);
-      addToConversation('System', '📸 Taking a screenshot to see what you\'re looking at...', 'system');
-      try {
-        const screenshotResult = await window.grandpalAPI.captureScreenshot();
-        if (screenshotResult.success && screenshotResult.screenshot) {
-          screenshot = screenshotResult.screenshot;
-          console.log('Screenshot captured for vision analysis');
-        } else {
-          addToConversation('System', 'Could not capture screenshot, continuing without vision.', 'error');
-        }
-      } catch (error) {
-        console.error('Error capturing screenshot:', error);
-        addToConversation('System', 'Could not capture screenshot, continuing without vision.', 'error');
-      } finally {
-        setIsTakingScreenshot(false);
+    
+    // Always take screenshot for every command (vision mode always enabled)
+    setIsTakingScreenshot(true);
+    try {
+      const screenshotResult = await window.grandpalAPI.captureScreenshot();
+      if (screenshotResult.success && screenshotResult.screenshot) {
+        screenshot = screenshotResult.screenshot;
+        console.log('Screenshot captured for vision analysis');
       }
+    } catch (error) {
+      console.error('Error capturing screenshot:', error);
+    } finally {
+      setIsTakingScreenshot(false);
     }
 
     const result = await window.grandpalAPI.processVoiceCommand(command, screenshot);
     if (result) {
-      addToConversation('GrandPal', result.response, 'assistant');
       await speakResponse(result.response);
     }
   };
@@ -292,25 +228,21 @@ const App = () => {
   const speakResponse = async (text: string) => {
     setIsSpeaking(true);
     
-    // Pause speech recognition (both Deepgram and browser fallback)
     if (usingBrowserFallback.current) {
       pauseBrowserSpeechRecognition();
     }
-    // Note: Deepgram pause is handled automatically in the voice processor
     
     const success = await window.grandpalAPI.speakText(text, currentLanguage);
     if (!success) {
       fallbackSpeak(text);
     }
-    // A more robust solution would be to get a callback when speech ends.
-    // For now, we'll estimate when it's safe to listen again.
+    
     setTimeout(() => {
       setIsSpeaking(false);
-      // Resume browser speech recognition if using fallback
       if (usingBrowserFallback.current) {
         resumeBrowserSpeechRecognition();
       }
-    }, 500 + text.length * 50); // Rough estimate
+    }, 500 + text.length * 50);
   };
 
   const fallbackSpeak = (text: string) => {
@@ -319,7 +251,6 @@ const App = () => {
       utterance.lang = currentLanguage;
       utterance.onend = () => {
         setIsSpeaking(false);
-        // Resume browser speech recognition if using fallback
         if (usingBrowserFallback.current) {
           resumeBrowserSpeechRecognition();
         }
@@ -328,7 +259,6 @@ const App = () => {
     } catch (error) {
       console.error("Fallback TTS failed:", error);
       setIsSpeaking(false);
-      // Resume browser speech recognition if using fallback
       if (usingBrowserFallback.current) {
         resumeBrowserSpeechRecognition();
       }
@@ -336,12 +266,12 @@ const App = () => {
   };
 
   const greetUser = () => {
-    speakResponse("Hello! I'm GrandPal, your voice assistant. Click the orb to talk to me.");
+    speakResponse("Hi! I'm GrandPal. I can see your screen and I'll keep my responses brief. Click me to talk.");
   };
 
   const handleOrbClick = async () => {
     if (listeningState === 'connecting' || listeningState === 'stopping' || isSpeaking) {
-      return; // Do nothing while in a transition state or speaking
+      return;
     }
 
     if (listeningState === 'listening') {
@@ -356,17 +286,15 @@ const App = () => {
     setListeningState('connecting');
 
     try {
-      addToConversation('System', 'Connecting...', 'system');
       await startMicrophoneCapture();
       const result = await window.grandpalAPI.startSpeechRecognition(currentLanguage);
       if (!result.success) {
-        addToConversation('System', `Could not start listening: ${result.error}. Trying browser fallback.`, 'error');
+        console.error('Could not start listening:', result.error);
         stopMicrophoneCapture();
         startBrowserSpeechRecognition(currentLanguage);
       }
     } catch (error) {
       console.error('Error starting listening:', error);
-      addToConversation('System', `Error starting microphone: ${(error as Error).message}. Trying browser fallback.`, 'error');
       setListeningState('idle');
       startBrowserSpeechRecognition(currentLanguage);
     }
@@ -396,59 +324,51 @@ const App = () => {
     console.log('Microphone capture stopped.');
   };
 
-  const addToConversation = (speaker: string, message: string, type: string) => {
-    setConversation((prev) => [...prev, { speaker, message, type }]);
-  };
-
-  const getStatusText = () => {
-    if (isTakingScreenshot) return 'Taking screenshot...';
-    if (isSpeaking) return 'Speaking...';
-    if (isPaused) return 'Paused for speaking';
-    if (listeningState === 'listening') return 'Listening...';
-    return 'Click to Speak';
-  };
-
   return (
-    <div id="app">
-      <div id="conversation">
-        {conversation.map((entry, index) => (
-          <div key={index} className={`message message-${entry.type}`}>
-            <strong>{entry.speaker}:</strong> {entry.message}
-          </div>
-        ))}
-      </div>
-      <div id="bottom-container">
-        <div id="interim-results">{interimResult}</div>
-        <div id="status">{getStatusText()}</div>
-        
-        {/* Control buttons */}
-        <div id="controls" style={{ 
-          display: 'flex', 
-          gap: '10px', 
-          alignItems: 'center', 
-          justifyContent: 'center',
-          marginBottom: '10px'
+    <div 
+      id="app" 
+      style={{
+        width: '100vw',
+        height: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'transparent',
+        cursor: 'move',
+        position: 'relative',
+        WebkitAppRegion: 'drag'
+      } as React.CSSProperties & { WebkitAppRegion?: string }}
+    >
+      {/* Vision indicator - small and minimal */}
+      {isTakingScreenshot && (
+        <div style={{
+          position: 'absolute',
+          top: '10px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          fontSize: '12px',
+          color: '#2196F3',
+          background: 'rgba(0,0,0,0.7)',
+          padding: '4px 8px',
+          borderRadius: '12px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '4px'
         }}>
-          <button 
-            onClick={takeManualScreenshot}
-            disabled={isTakingScreenshot || isSpeaking}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: isTakingScreenshot ? '#666' : '#4CAF50',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: isTakingScreenshot || isSpeaking ? 'not-allowed' : 'pointer',
-              fontSize: '14px'
-            }}
-          >
-            {isTakingScreenshot ? '📸 Taking...' : '📸 Look at Screen'}
-          </button>
+          <span>📸</span>
         </div>
+      )}
 
-        <div onClick={handleOrbClick} style={{ cursor: 'pointer' }}>
-          <Orb forceHoverState={listeningState === 'listening' || listeningState === 'connecting' || isSpeaking || isTakingScreenshot} />
-        </div>
+      {/* Main orb - make it non-draggable for clicking */}
+      <div 
+        onClick={handleOrbClick} 
+        style={{ 
+          cursor: 'pointer',
+          borderRadius: '50%',
+          WebkitAppRegion: 'no-drag'
+        } as React.CSSProperties & { WebkitAppRegion?: string }}
+      >
+        <Orb forceHoverState={listeningState === 'listening' || listeningState === 'connecting' || isSpeaking || isTakingScreenshot} />
       </div>
     </div>
   );

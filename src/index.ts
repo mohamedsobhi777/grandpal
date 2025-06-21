@@ -20,16 +20,22 @@ if (require('electron-squirrel-startup')) {
 const createWindow = (): void => {
   // Create a minimal browser window for GrandPal (voice-only interface)
   const mainWindow = new BrowserWindow({
-    height: 600,
-    width: 500,
-    resizable: true,
+    height: 300,
+    width: 300,
+    resizable: false,
+    frame: false,
     titleBarStyle: 'hiddenInset',
+    alwaysOnTop: true,
+    transparent: true,
     webPreferences: {
       preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
       nodeIntegration: false,
       contextIsolation: true,
     },
   });
+
+  // Make the entire window draggable
+  mainWindow.setMovable(true);
 
   // and load the index.html of the app.
   mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);

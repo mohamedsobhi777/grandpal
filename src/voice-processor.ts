@@ -12,6 +12,7 @@ import dotenv from "dotenv";
 import axios from "axios";
 import { DeepgramSpeechService } from "./deepgram-service";
 import { ipcMain } from "electron"; // Add for screenshot functionality
+import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 
 dotenv.config({ path: ".env" });
 
@@ -28,6 +29,7 @@ export class VoiceProcessor {
     private anthropic: Anthropic;
     private ttsProcess: ChildProcess | null = null;
     private speechService: DeepgramSpeechService | null = null;
+    private elevenlabs: ElevenLabsClient | null = null;
 
     constructor(speechService?: DeepgramSpeechService) {
         this.loadUserPreferences();
@@ -35,6 +37,13 @@ export class VoiceProcessor {
             apiKey: process.env.ANTHROPIC_API_KEY,
         });
         this.speechService = speechService || null;
+        
+        // Initialize ElevenLabs if API key is available
+        if (process.env.ELEVENLABS_API_KEY) {
+            this.elevenlabs = new ElevenLabsClient({
+                apiKey: process.env.ELEVENLABS_API_KEY,
+            });
+        }
     }
 
     /**
@@ -241,30 +250,24 @@ export class VoiceProcessor {
     }
 
     private getSystemPrompt(): string {
-        return `You are GrandPal, a voice assistant designed for grandparents. Your primary goal is to make technology easy and accessible.
+        return `You are GrandPal, a brief and friendly voice assistant. This is a VOICE conversation - keep ALL responses extremely short, like talking to a friend.
 
-Your personality:
-- Extremely patient, warm, and friendly.
-- Speak in simple, clear language. Avoid all technical jargon.
-- Keep your answers very short and to the point. Be brief.
-- Be very forgiving of mistakes. If a user mispronounces a word or their request is ambiguous, make a best guess or ask a simple clarifying question. Never sound critical or confused.
+Critical rules:
+- Maximum 1-2 sentences per response
+- Speak naturally like you're talking, not writing
+- Never use bullet points, lists, or long explanations
+- Be warm but concise
+- Act immediately when asked to do something
 
-Your capabilities:
-- You can help with basic computer tasks using the tools you have available.
-- You can see what's on the user's screen when they ask you to look at something.
-- When a user asks you to "look at" something or "see what's on my screen", you should use the take_screenshot tool first.
+Voice examples:
+- User: "Show me my pictures" -> "Opening your photos now!"
+- User: "What's the weather?" -> "It's 72 degrees and sunny today."
+- User: "What's on my screen?" -> "I can see your desktop with several folders open."
+- User: "I'm lonely" -> "I'm here with you. Want to chat?"
 
-Your main tasks are to help the user by using the tools you have available. When a user asks for something that a tool can do, you MUST use that tool. Do not simply describe what you can do. When you use a tool, do not mention the tool's name in your response.
+Always use tools when requested. Never explain what you CAN do - just do it.
 
-Example:
-- User: "Show me my pictures." -> Use the 'open_photos' tool and respond with "Of course, I'll open your photos."
-- User: "What's it like outside?" -> Use the 'check_weather' tool and respond with the weather forecast.
-- User: "What's on my screen?" or "Can you see what I'm looking at?" -> Use the 'take_screenshot' tool first, then describe what you see.
-- User: "I'm lonely." -> Respond with a kind, short, and comforting message.
-
-When you can see an image (screenshot), describe what you see clearly and helpfully. Focus on what would be most useful for the user to know.
-
-Today's date is ${new Date().toDateString()}. The user's operating system is ${os.platform()}.`;
+Today is ${new Date().toDateString()}.`;
     }
 
     private getAvailableTools(): Anthropic.Tool[] {
@@ -588,6 +591,80 @@ Today's date is ${new Date().toDateString()}. The user's operating system is ${o
         }
 
         try {
+            // Try ElevenLabs TTS first if available
+            if (this.elevenlabs && process.env.ELEVENLABS_API_KEY) {
+                console.log("Using ElevenLabs TTS with voice ID: NOpBlnGInO9m6vDvFkFC");
+                
+                try {
+                    const audioStream = await this.elevenlabs.textToSpeech.convert("NOpBlnGInO9m6vDvFkFC", {
+                        text: text,
+                        modelId: "eleven_monolingual_v1",
+                        voiceSettings: {
+                            stability: 0.5,
+                            similarityBoost: 0.75,
+                            style: 0.0,
+                            useSpeakerBoost: true
+                        }
+                    });
+
+                    // Create a temporary file to play the audio
+                    const tempDir = os.tmpdir();
+                    const tempFile = path.join(tempDir, `grandpal_tts_${Date.now()}.mp3`);
+
+                    // Write the audio stream to a file
+                    const chunks: Buffer[] = [];
+                    const reader = audioStream.getReader();
+                    let done = false;
+                    while (!done) {
+                        const { value, done: readerDone } = await reader.read();
+                        if (value) chunks.push(Buffer.from(value));
+                        done = readerDone;
+                    }
+                    const audioBuffer = Buffer.concat(chunks);
+                    await fs.writeFile(tempFile, audioBuffer);
+
+                    // Play the audio file
+                    let playCommand: string;
+                    if (process.platform === "darwin") {
+                        playCommand = `afplay "${tempFile}"`;
+                    } else if (process.platform === "win32") {
+                        playCommand = `powershell -Command "(New-Object Media.SoundPlayer '${tempFile}').PlaySync()"`;
+                    } else {
+                        playCommand = `aplay "${tempFile}"`;
+                    }
+
+                    this.ttsProcess = exec(playCommand, async (error) => {
+                        if (error && !error.killed) {
+                            console.error("TTS playback error:", error);
+                        }
+                        
+                        // Clean up temp file
+                        try {
+                            await fs.unlink(tempFile);
+                        } catch (unlinkError) {
+                            console.warn("Could not clean up temp file:", unlinkError);
+                        }
+                        
+                        this.ttsProcess = null;
+                        
+                        // Resume speech recognition after TTS finishes
+                        if (this.speechService) {
+                            // Add a small delay to ensure TTS audio has cleared
+                            setTimeout(() => {
+                                this.speechService?.resumeListening();
+                            }, 500);
+                        }
+                    });
+                    
+                    return true;
+                } catch (elevenLabsError) {
+                    console.error("ElevenLabs TTS failed, falling back to system TTS:", elevenLabsError);
+                    // Fall through to system TTS
+                }
+            }
+
+            // Fallback to system TTS
+            console.log("Using system TTS as fallback");
             let command: string;
             if (process.platform === "darwin") {
                 command = `say -v "Samantha" "${text.replace(/"/g, '\\"')}"`;
