@@ -3,8 +3,13 @@ import { createRoot } from 'react-dom/client';
 import Orb from './components/orb';
 import './App.css';
 
+type ListeningState = 'idle' | 'connecting' | 'listening' | 'stopping';
+
 const App = () => {
-  const [isListening, setIsListening] = useState(false);
+  const [listeningState, setListeningState] = useState<ListeningState>('idle');
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [isTakingScreenshot, setIsTakingScreenshot] = useState(false);
   const [conversation, setConversation] = useState<{ speaker: string; message: string; type: string }[]>([]);
   const [interimResult, setInterimResult] = useState('');
   const [currentLanguage, setCurrentLanguage] = useState('en');
@@ -13,6 +18,7 @@ const App = () => {
   const audioContext = useRef<AudioContext | null>(null);
   const browserRecognition = useRef<any>(null);
   const usingBrowserFallback = useRef(false);
+  const browserPausedForSpeaking = useRef(false);
 
   useEffect(() => {
     initializeSpeechRecognition();
@@ -24,6 +30,32 @@ const App = () => {
       stopListening();
     };
   }, []);
+
+  const stopSpeaking = () => {
+    window.speechSynthesis.cancel(); // Stop browser TTS
+    window.grandpalAPI.stopSpeaking(); // Stop backend TTS
+  };
+
+  const pauseBrowserSpeechRecognition = () => {
+    if (browserRecognition.current && usingBrowserFallback.current) {
+      console.log("Pausing browser speech recognition for TTS");
+      browserRecognition.current.stop();
+      browserPausedForSpeaking.current = true;
+    }
+  };
+
+  const resumeBrowserSpeechRecognition = () => {
+    if (browserRecognition.current && usingBrowserFallback.current && browserPausedForSpeaking.current) {
+      console.log("Resuming browser speech recognition after TTS");
+      try {
+        browserRecognition.current.start();
+        browserPausedForSpeaking.current = false;
+      } catch (error) {
+        console.error('Error resuming browser recognition:', error);
+        browserPausedForSpeaking.current = false;
+      }
+    }
+  };
 
   const startMicrophoneCapture = async () => {
     try {
@@ -83,7 +115,12 @@ const App = () => {
     });
 
     window.grandpalAPI.onSpeechListeningStatus((isListening: boolean) => {
-      setIsListening(isListening);
+      if (isSpeaking) return; // Ignore listening status changes while speaking
+      setListeningState(isListening ? 'listening' : 'idle');
+    });
+
+    window.grandpalAPI.onSpeechPausedStatus((paused: boolean) => {
+      setIsPaused(paused);
     });
 
     window.grandpalAPI.onSpeechError((error: any) => {
@@ -109,20 +146,31 @@ const App = () => {
     recognition.interimResults = true;
 
     recognition.onstart = () => {
-      setIsListening(true);
-      addToConversation('System', '🎤 Listening with browser...', 'system');
+      if (!browserPausedForSpeaking.current) {
+        setListeningState('listening');
+        addToConversation('System', '🎤 Listening with browser...', 'system');
+      }
     };
 
     recognition.onerror = (event: any) => {
-      addToConversation('System', `Browser Speech Error: ${event.error}`, 'error');
-      setIsListening(false);
+      if (!browserPausedForSpeaking.current) {
+        addToConversation('System', `Browser Speech Error: ${event.error}`, 'error');
+        setListeningState('idle');
+      }
     };
 
     recognition.onend = () => {
-      setIsListening(false);
+      if (!browserPausedForSpeaking.current) {
+        setListeningState('idle');
+      }
     };
 
     recognition.onresult = (event: any) => {
+      // Don't process results if we paused for speaking
+      if (browserPausedForSpeaking.current) {
+        return;
+      }
+
       let finalTranscript = '';
       let interimTranscript = '';
 
@@ -152,6 +200,7 @@ const App = () => {
       browserRecognition.current.lang = language;
       browserRecognition.current.start();
       usingBrowserFallback.current = true;
+      browserPausedForSpeaking.current = false;
       return true;
     } catch (error) {
       console.error('Could not start browser recognition:', error);
@@ -162,6 +211,7 @@ const App = () => {
   const stopBrowserSpeechRecognition = () => {
     if (browserRecognition.current) {
       browserRecognition.current.stop();
+      browserPausedForSpeaking.current = false;
     }
   };
 
@@ -176,28 +226,112 @@ const App = () => {
     }
   };
 
+  const takeManualScreenshot = async () => {
+    setIsTakingScreenshot(true);
+    addToConversation('System', '📸 Taking screenshot...', 'system');
+    
+    try {
+      const screenshotResult = await window.grandpalAPI.captureScreenshot();
+      if (screenshotResult.success && screenshotResult.screenshot) {
+        addToConversation('System', '✅ Screenshot captured! You can now ask me about what\'s on your screen.', 'system');
+        // Process a default command to analyze the screenshot
+        const result = await window.grandpalAPI.processVoiceCommand("What do you see on my screen?", screenshotResult.screenshot);
+        if (result) {
+          addToConversation('GrandPal', result.response, 'assistant');
+          await speakResponse(result.response);
+        }
+      } else {
+        addToConversation('System', '❌ Could not capture screenshot. Please try again.', 'error');
+      }
+    } catch (error) {
+      console.error('Error capturing screenshot:', error);
+      addToConversation('System', '❌ Error capturing screenshot. Please try again.', 'error');
+    } finally {
+      setIsTakingScreenshot(false);
+    }
+  };
+
   const processVoiceCommand = async (command: string) => {
-    const result = await window.grandpalAPI.processVoiceCommand(command);
+    if (listeningState === 'listening' || listeningState === 'connecting') {
+      await stopListening();
+    }
+
+    // Check if the user is asking GrandPal to look at something
+    const lookKeywords = ['look at', 'see', 'what\'s on', 'screen', 'display', 'showing', 'visible', 'looking at'];
+    const shouldTakeScreenshot = lookKeywords.some(keyword => 
+      command.toLowerCase().includes(keyword)
+    );
+
+    let screenshot: string | undefined;
+    if (shouldTakeScreenshot) {
+      setIsTakingScreenshot(true);
+      addToConversation('System', '📸 Taking a screenshot to see what you\'re looking at...', 'system');
+      try {
+        const screenshotResult = await window.grandpalAPI.captureScreenshot();
+        if (screenshotResult.success && screenshotResult.screenshot) {
+          screenshot = screenshotResult.screenshot;
+          console.log('Screenshot captured for vision analysis');
+        } else {
+          addToConversation('System', 'Could not capture screenshot, continuing without vision.', 'error');
+        }
+      } catch (error) {
+        console.error('Error capturing screenshot:', error);
+        addToConversation('System', 'Could not capture screenshot, continuing without vision.', 'error');
+      } finally {
+        setIsTakingScreenshot(false);
+      }
+    }
+
+    const result = await window.grandpalAPI.processVoiceCommand(command, screenshot);
     if (result) {
       addToConversation('GrandPal', result.response, 'assistant');
-      speakResponse(result.response);
+      await speakResponse(result.response);
     }
   };
 
   const speakResponse = async (text: string) => {
+    setIsSpeaking(true);
+    
+    // Pause speech recognition (both Deepgram and browser fallback)
+    if (usingBrowserFallback.current) {
+      pauseBrowserSpeechRecognition();
+    }
+    // Note: Deepgram pause is handled automatically in the voice processor
+    
     const success = await window.grandpalAPI.speakText(text, currentLanguage);
     if (!success) {
       fallbackSpeak(text);
     }
+    // A more robust solution would be to get a callback when speech ends.
+    // For now, we'll estimate when it's safe to listen again.
+    setTimeout(() => {
+      setIsSpeaking(false);
+      // Resume browser speech recognition if using fallback
+      if (usingBrowserFallback.current) {
+        resumeBrowserSpeechRecognition();
+      }
+    }, 500 + text.length * 50); // Rough estimate
   };
 
   const fallbackSpeak = (text: string) => {
     try {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = currentLanguage;
+      utterance.onend = () => {
+        setIsSpeaking(false);
+        // Resume browser speech recognition if using fallback
+        if (usingBrowserFallback.current) {
+          resumeBrowserSpeechRecognition();
+        }
+      };
       window.speechSynthesis.speak(utterance);
     } catch (error) {
       console.error("Fallback TTS failed:", error);
+      setIsSpeaking(false);
+      // Resume browser speech recognition if using fallback
+      if (usingBrowserFallback.current) {
+        resumeBrowserSpeechRecognition();
+      }
     }
   };
 
@@ -205,11 +339,21 @@ const App = () => {
     speakResponse("Hello! I'm GrandPal, your voice assistant. Click the orb to talk to me.");
   };
 
-  const startListening = async () => {
-    if (isListening) {
-      await stopListening();
-      return;
+  const handleOrbClick = async () => {
+    if (listeningState === 'connecting' || listeningState === 'stopping' || isSpeaking) {
+      return; // Do nothing while in a transition state or speaking
     }
+
+    if (listeningState === 'listening') {
+      await stopListening();
+    } else {
+      await startListening();
+    }
+  };
+
+  const startListening = async () => {
+    stopSpeaking();
+    setListeningState('connecting');
 
     try {
       addToConversation('System', 'Connecting...', 'system');
@@ -223,12 +367,13 @@ const App = () => {
     } catch (error) {
       console.error('Error starting listening:', error);
       addToConversation('System', `Error starting microphone: ${(error as Error).message}. Trying browser fallback.`, 'error');
-      setIsListening(false);
+      setListeningState('idle');
       startBrowserSpeechRecognition(currentLanguage);
     }
   };
 
   const stopListening = async () => {
+    setListeningState('stopping');
     if (usingBrowserFallback.current) {
       stopBrowserSpeechRecognition();
       usingBrowserFallback.current = false;
@@ -236,7 +381,7 @@ const App = () => {
       await window.grandpalAPI.stopSpeechRecognition();
     }
     stopMicrophoneCapture();
-    setIsListening(false);
+    setListeningState('idle');
   };
 
   const stopMicrophoneCapture = () => {
@@ -255,6 +400,14 @@ const App = () => {
     setConversation((prev) => [...prev, { speaker, message, type }]);
   };
 
+  const getStatusText = () => {
+    if (isTakingScreenshot) return 'Taking screenshot...';
+    if (isSpeaking) return 'Speaking...';
+    if (isPaused) return 'Paused for speaking';
+    if (listeningState === 'listening') return 'Listening...';
+    return 'Click to Speak';
+  };
+
   return (
     <div id="app">
       <div id="conversation">
@@ -266,9 +419,35 @@ const App = () => {
       </div>
       <div id="bottom-container">
         <div id="interim-results">{interimResult}</div>
-        <div id="status">{isListening ? 'Listening...' : 'Click to Speak'}</div>
-        <div onClick={startListening} style={{ cursor: 'pointer' }}>
-          <Orb forceHoverState={isListening} />
+        <div id="status">{getStatusText()}</div>
+        
+        {/* Control buttons */}
+        <div id="controls" style={{ 
+          display: 'flex', 
+          gap: '10px', 
+          alignItems: 'center', 
+          justifyContent: 'center',
+          marginBottom: '10px'
+        }}>
+          <button 
+            onClick={takeManualScreenshot}
+            disabled={isTakingScreenshot || isSpeaking}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: isTakingScreenshot ? '#666' : '#4CAF50',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: isTakingScreenshot || isSpeaking ? 'not-allowed' : 'pointer',
+              fontSize: '14px'
+            }}
+          >
+            {isTakingScreenshot ? '📸 Taking...' : '📸 Look at Screen'}
+          </button>
+        </div>
+
+        <div onClick={handleOrbClick} style={{ cursor: 'pointer' }}>
+          <Orb forceHoverState={listeningState === 'listening' || listeningState === 'connecting' || isSpeaking || isTakingScreenshot} />
         </div>
       </div>
     </div>

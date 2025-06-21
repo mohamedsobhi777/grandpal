@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, desktopCapturer } from 'electron';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 import { VoiceProcessor } from './voice-processor';
@@ -46,17 +46,44 @@ const createWindow = (): void => {
   setupSpeechServiceEvents(mainWindow);
 };
 
-// Initialize voice processor and speech service
-const voiceProcessor = new VoiceProcessor();
+// Initialize speech service first, then voice processor with speech service reference
 const speechService = new DeepgramSpeechService();
+const voiceProcessor = new VoiceProcessor(speechService);
+
+/**
+ * Capture a screenshot of the primary display
+ */
+async function captureScreenshot(): Promise<string | null> {
+  try {
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const { width, height } = primaryDisplay.bounds;
+
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width, height }
+    });
+
+    if (sources.length > 0) {
+      const primarySource = sources[0];
+      // Convert to base64 data URL
+      const dataURL = primarySource.thumbnail.toDataURL();
+      console.log('Screenshot captured successfully');
+      return dataURL;
+    }
+    return null;
+  } catch (error) {
+    console.error('Error capturing screenshot:', error);
+    return null;
+  }
+}
 
 // Set up IPC communication between main and renderer processes
 function setupIpcHandlers(): void {
   // Handle voice commands
-  ipcMain.handle('process-voice-command', async (event, command: string) => {
+  ipcMain.handle('process-voice-command', async (event, command: string, screenshot?: string) => {
     console.log('Processing voice command:', command);
     try {
-      const result = await voiceProcessor.processCommand(command);
+      const result = await voiceProcessor.processCommand(command, screenshot);
       return result;
     } catch (error) {
       console.error('Error processing voice command:', error);
@@ -65,6 +92,18 @@ function setupIpcHandlers(): void {
         action: 'error',
         success: false 
       };
+    }
+  });
+
+  // Handle screenshot capture
+  ipcMain.handle('capture-screenshot', async (event) => {
+    console.log('Capturing screenshot');
+    try {
+      const screenshot = await captureScreenshot();
+      return { success: true, screenshot };
+    } catch (error) {
+      console.error('Error capturing screenshot:', error);
+      return { success: false, error: error.message };
     }
   });
 
@@ -91,8 +130,35 @@ function setupIpcHandlers(): void {
     }
   });
 
+  // Add pause/resume handlers
+  ipcMain.handle('pause-speech-recognition', async (event) => {
+    console.log('Pausing speech recognition');
+    try {
+      speechService.pauseListening();
+      return { success: true };
+    } catch (error) {
+      console.error('Error pausing speech recognition:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('resume-speech-recognition', async (event) => {
+    console.log('Resuming speech recognition');
+    try {
+      speechService.resumeListening();
+      return { success: true };
+    } catch (error) {
+      console.error('Error resuming speech recognition:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
   ipcMain.handle('is-speech-listening', async (event) => {
     return { listening: speechService.isCurrentlyListening() };
+  });
+
+  ipcMain.handle('is-speech-paused', async (event) => {
+    return { paused: speechService.isCurrentlyPaused() };
   });
 
   // Handle filesystem operations
@@ -127,6 +193,10 @@ function setupIpcHandlers(): void {
   ipcMain.on('audio-chunk', (event, chunk) => {
     speechService.sendAudio(chunk);
   });
+
+  ipcMain.on('stop-speaking', () => {
+    voiceProcessor.stopSpeaking();
+  });
 }
 
 // Set up speech service event forwarding to renderer
@@ -138,6 +208,10 @@ function setupSpeechServiceEvents(mainWindow: BrowserWindow): void {
 
   speechService.on('listening', (isListening: boolean) => {
     mainWindow.webContents.send('speech-listening-status', isListening);
+  });
+
+  speechService.on('paused', (isPaused: boolean) => {
+    mainWindow.webContents.send('speech-paused-status', isPaused);
   });
 
   speechService.on('error', (error: any) => {

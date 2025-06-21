@@ -6,8 +6,12 @@ import { contextBridge, ipcRenderer } from 'electron';
 // Expose GrandPal APIs to the renderer process
 contextBridge.exposeInMainWorld('grandpalAPI', {
   // Voice command processing
-  processVoiceCommand: (command: string) => 
-    ipcRenderer.invoke('process-voice-command', command),
+  processVoiceCommand: (command: string, screenshot?: string) => 
+    ipcRenderer.invoke('process-voice-command', command, screenshot),
+  
+  // Screenshot capture
+  captureScreenshot: () =>
+    ipcRenderer.invoke('capture-screenshot'),
   
   // Speech recognition control
   startSpeechRecognition: (language?: string) =>
@@ -16,8 +20,17 @@ contextBridge.exposeInMainWorld('grandpalAPI', {
   stopSpeechRecognition: () =>
     ipcRenderer.invoke('stop-speech-recognition'),
   
+  pauseSpeechRecognition: () =>
+    ipcRenderer.invoke('pause-speech-recognition'),
+  
+  resumeSpeechRecognition: () =>
+    ipcRenderer.invoke('resume-speech-recognition'),
+  
   isSpeechListening: () =>
     ipcRenderer.invoke('is-speech-listening'),
+  
+  isSpeechPaused: () =>
+    ipcRenderer.invoke('is-speech-paused'),
   
   // Filesystem operations
   executeFilesystemAction: (action: string, params: any) => 
@@ -44,6 +57,10 @@ contextBridge.exposeInMainWorld('grandpalAPI', {
     ipcRenderer.on('speech-listening-status', (event, isListening) => callback(isListening));
   },
   
+  onSpeechPausedStatus: (callback: (isPaused: boolean) => void) => {
+    ipcRenderer.on('speech-paused-status', (event, isPaused) => callback(isPaused));
+  },
+  
   onSpeechError: (callback: (error: any) => void) => {
     ipcRenderer.on('speech-error', (event, error) => callback(error));
   },
@@ -56,10 +73,15 @@ contextBridge.exposeInMainWorld('grandpalAPI', {
     ipcRenderer.send('audio-chunk', chunk);
   },
   
+  stopSpeaking: () => {
+    ipcRenderer.send('stop-speaking');
+  },
+  
   // Remove speech recognition listeners
   removeSpeechListeners: () => {
     ipcRenderer.removeAllListeners('speech-transcript');
     ipcRenderer.removeAllListeners('speech-listening-status');
+    ipcRenderer.removeAllListeners('speech-paused-status');
     ipcRenderer.removeAllListeners('speech-error');
     ipcRenderer.removeAllListeners('speech-fallback-to-browser');
   }
@@ -69,19 +91,25 @@ contextBridge.exposeInMainWorld('grandpalAPI', {
 declare global {
   interface Window {
     grandpalAPI: {
-      processVoiceCommand: (command: string) => Promise<{response: string, action: string}>;
+      processVoiceCommand: (command: string, screenshot?: string) => Promise<{response: string, action: string}>;
+      captureScreenshot: () => Promise<{success: boolean, screenshot?: string, error?: string}>;
       startSpeechRecognition: (language?: string) => Promise<{success: boolean, error?: string}>;
       stopSpeechRecognition: () => Promise<{success: boolean, error?: string}>;
+      pauseSpeechRecognition: () => Promise<{success: boolean, error?: string}>;
+      resumeSpeechRecognition: () => Promise<{success: boolean, error?: string}>;
       isSpeechListening: () => Promise<{listening: boolean}>;
+      isSpeechPaused: () => Promise<{paused: boolean}>;
       executeFilesystemAction: (action: string, params: any) => Promise<{success: boolean, message: string}>;
       speakText: (text: string, language?: string) => Promise<{success: boolean}>;
       getDeepgramInstructions: () => Promise<{instructions: string}>;
       getEnvVar: (name: string) => Promise<string>;
       onSpeechTranscript: (callback: (result: any) => void) => void;
       onSpeechListeningStatus: (callback: (isListening: boolean) => void) => void;
+      onSpeechPausedStatus: (callback: (isPaused: boolean) => void) => void;
       onSpeechError: (callback: (error: any) => void) => void;
       onSpeechFallbackToBrowser: (callback: (data: any) => void) => void;
       sendAudioChunk: (chunk: Uint8Array) => void;
+      stopSpeaking: () => void;
       removeSpeechListeners: () => void;
     };
   }

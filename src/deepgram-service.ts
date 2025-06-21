@@ -20,6 +20,7 @@ export class DeepgramSpeechService extends EventEmitter {
     private deepgram: any;
     private connection: any = null;
     private isListening = false;
+    private isPaused = false;
     private language = "en";
 
     private apiKey = process.env.DEEPGRAM_API_KEY || "demo-key";
@@ -44,7 +45,7 @@ export class DeepgramSpeechService extends EventEmitter {
     }
 
     sendAudio(chunk: Buffer) {
-        if (this.connection && this.connection.getReadyState() === 1) { // 1 = OPEN
+        if (this.connection && this.connection.getReadyState() === 1 && this.isListening && !this.isPaused) {
             this.connection.send(chunk);
         }
     }
@@ -56,6 +57,7 @@ export class DeepgramSpeechService extends EventEmitter {
         }
 
         this.language = language;
+        this.isPaused = false;
 
         try {
             if (this.apiKey !== "demo-key" && this.deepgram) {
@@ -96,6 +98,7 @@ export class DeepgramSpeechService extends EventEmitter {
             this.connection.on("close", () => {
                 console.log("Deepgram connection closed");
                 this.isListening = false;
+                this.isPaused = false;
                 this.emit("listening", false);
             });
 
@@ -104,6 +107,10 @@ export class DeepgramSpeechService extends EventEmitter {
             });
 
             this.connection.on("Results", (data: any) => {
+                if (this.isPaused) {
+                    return;
+                }
+
                 const sentence = data.channel?.alternatives?.[0]?.transcript;
                 
                 if (!sentence || sentence.length === 0) {
@@ -158,6 +165,22 @@ export class DeepgramSpeechService extends EventEmitter {
         return true;
     }
 
+    pauseListening(): void {
+        if (this.isListening && !this.isPaused) {
+            console.log("Pausing speech recognition (assistant speaking)");
+            this.isPaused = true;
+            this.emit("paused", true);
+        }
+    }
+
+    resumeListening(): void {
+        if (this.isListening && this.isPaused) {
+            console.log("Resuming speech recognition (assistant finished speaking)");
+            this.isPaused = false;
+            this.emit("paused", false);
+        }
+    }
+
     stopListening(): void {
         if (!this.isListening) {
             console.log("Not currently listening");
@@ -171,6 +194,7 @@ export class DeepgramSpeechService extends EventEmitter {
             }
 
             this.isListening = false;
+            this.isPaused = false;
             this.emit("listening", false);
             console.log("Stopped listening");
         } catch (error) {
@@ -198,6 +222,10 @@ export class DeepgramSpeechService extends EventEmitter {
 
     isCurrentlyListening(): boolean {
         return this.isListening;
+    }
+
+    isCurrentlyPaused(): boolean {
+        return this.isPaused;
     }
 
     setLanguage(language: string): void {
